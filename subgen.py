@@ -1398,52 +1398,90 @@ def gen_subtitles(file_path: str, transcription_type: str, force_language: Langu
     """
 
     try:
+        logging.info(f"Queuing file for processing: {os.path.basename(file_path)}")
+        start_time = time.time()
         start_model()
         
         # Check if the file is an audio file before trying to extract audio 
         file_name, file_extension = os.path.splitext(file_path)
         is_audio_file = isAudioFileExtension(file_extension)
-        
-        data = file_path
-        # Extract audio from the file if it has multiple audio tracks
-        extracted_audio_file = handle_multiple_audio_tracks(file_path, force_language)
-        # handle_multiple_audio_tracks now returns bytes directly
-        if extracted_audio_file:
-            data = extracted_audio_file
-        
-        args = {}
-        display_name = os.path.basename(file_path)
-        args['progress_callback'] = ProgressHandler(display_name)
-            
+
+        args = {
+            'progress_callback': ProgressHandler(os.path.basename(file_path))
+        }
         if custom_regroup and custom_regroup.lower() != 'default':
             args['regroup'] = custom_regroup
-            
         args.update(kwargs)
+
+        # Get all audio tracks
+        audio_tracks = get_audio_tracks(file_path)
+        requested_language = force_language.to_iso_639_1() if force_language != LanguageCode.NONE else None
         
-        result = model.transcribe(data, language=force_language.to_iso_639_1(), task=transcription_type, verbose=None, **args)
-
-        appendLine(result)
-
-        output_language = LanguageCode.from_string(result.language)
-        subtitle_file_path = ""
-
-        # If it is an audio file, write the LRC file
-        if is_audio_file and lrc_for_audio_files:
-            subtitle_file_path = file_name + '.lrc'
-            write_lrc(result, subtitle_file_path)
-        else:
-            subtitle_file_path = name_subtitle(file_path, output_language)
-            result.to_srt_vtt(subtitle_file_path, word_level=word_level_highlight)
+        if is_audio_file or len(audio_tracks) <= 1:
+            # For audio files or videos with only one audio track, process normally
+            data = file_path
+            result = model.transcribe(data, language=requested_language, task=transcription_type, verbose=None, **args)
+            appendLine(result)
+            output_language = force_language if force_language != LanguageCode.NONE else LanguageCode.from_string(result.language)
             
-        # Trigger the downstream webhook
-        send_completion_webhook(file_path, subtitle_file_path, output_language, transcription_type)
+            # Save output
+            if is_audio_file and lrc_for_audio_files:
+                subtitle_file_path = file_name + '.lrc'
+                write_lrc(result, subtitle_file_path)
+            else:
+                subtitle_file_path = name_subtitle(file_path, output_language)
+                result.to_srt_vtt(subtitle_file_path, word_level=word_level_highlight)
+
+            send_completion_webhook(file_path, subtitle_file_path, output_language, transcription_type)
+        else:
+            # Process each audio track separately
+            logging.info(f"Processing {len(audio_tracks)} audio tracks in {os.path.basename(file_path)}")
+            
+            for i, track in enumerate(audio_tracks):
+                track_language = track['language']
+                track_index = track['index']
+                track_title = track['title'] if track['title'] != 'None' else f"Track {i+1}"
+                
+                logging.info(f"Transcribing audio track {track_index}: {track_title} ({track_language})")
+                
+                # Extract the specific audio track
+                audio_data = extract_audio_track_to_memory(file_path, track_index)
+                if audio_data is None:
+                    logging.error(f"Failed to extract audio track {track_index} from {file_path}")
+                    continue
+                
+                # Transcribe the audio track
+                track_result = model.transcribe(
+                    audio_data, 
+                    language=requested_language or (track_language.to_iso_639_1() if track_language != LanguageCode.NONE else None), 
+                    task=transcription_type, 
+                    verbose=None,
+                    **args
+                )
+                appendLine(track_result)
+                
+                # Determine the language for the subtitle file
+                detected_language = force_language if force_language != LanguageCode.NONE else (
+                    track_language if track_language != LanguageCode.NONE else LanguageCode.from_string(track_result.language)
+                )
+                
+                # Save the subtitle with track information in the filename
+                track_subtitle_path = name_subtitle_with_track(file_path, detected_language, i+1, track_title)
+                track_result.to_srt_vtt(track_subtitle_path, word_level=word_level_highlight)
+                send_completion_webhook(file_path, track_subtitle_path, detected_language, transcription_type)
+                
+                logging.info(f"Completed transcription for track {i+1}: {track_title}")
+
+        elapsed_time = time.time() - start_time
+        minutes, seconds = divmod(int(elapsed_time), 60)
+        logging.info(f"Completed transcription: {os.path.basename(file_path)} in {minutes}m {seconds}s")
 
     except Exception as e:
         logging.info(f"Error processing or transcribing {file_path} in {force_language}: {e}")
 
     finally:
         delete_model()
-        
+
 def define_subtitle_language_naming(language: LanguageCode, type):
     """
     Determines the naming format for a subtitle language based on the given type. 
@@ -1485,7 +1523,29 @@ def name_subtitle(file_path: str, language: LanguageCode) -> str:
     lang_part = define_subtitle_language_naming(language, subtitle_language_naming_type)
     
     return f"{os.path.splitext(file_path)[0]}{subgen_part}{model_part}.{lang_part}.srt"
+
+def name_subtitle_with_track(file_path: str, language: LanguageCode, track_number: int, track_title: str) -> str:
+    """
+    Name the subtitle file to be written, based on the source file, language, and track information.
+
+    Args:
+        file_path: The path to the source file.
+        language: The language of the subtitle.
+        track_number: The track number.
+        track_title: The title of the track.
     
+    Returns:
+        The name of the subtitle file to be written.
+    """
+    subgen_part = ".subgen" if show_in_subname_subgen else ""
+    model_part = f".{whisper_model}" if show_in_subname_model else ""
+    lang_part = define_subtitle_language_naming(language, subtitle_language_naming_type)
+    
+    # Clean track_title to make it filesystem-safe
+    safe_title = "".join(c if c.isalnum() or c in " -_." else "_" for c in track_title)
+    
+    return f"{os.path.splitext(file_path)[0]}{subgen_part}{model_part}.{lang_part}.track{track_number}.{safe_title}.srt"
+
 def handle_multiple_audio_tracks(file_path: str, language: LanguageCode | None = None) -> bytes | None:
     """
     Handles the possibility of a media file having multiple audio tracks. 
@@ -1505,6 +1565,7 @@ def handle_multiple_audio_tracks(file_path: str, language: LanguageCode | None =
     audio_tracks = get_audio_tracks(file_path)
 
     if len(audio_tracks) > 1:
+        audio_track = None
         logging.debug(f"Handling multiple audio tracks from {file_path} and planning to extract audio track of language {language}")
         logging.debug(
             "Audio tracks:\n"
