@@ -1,4 +1,4 @@
-subgen_version = '2026.04.3'
+subgen_version = '2026.04.8'
 
 """
 ENVIRONMENT VARIABLES DOCUMENTATION
@@ -1445,15 +1445,23 @@ def gen_subtitles(file_path: str, transcription_type: str, force_language: Langu
                 logging.info(f"Transcribing audio track {track_index}: {track_title} ({track_language})")
                 
                 # Extract the specific audio track
-                audio_data = extract_audio_track_to_memory(file_path, track_index)
-                if audio_data is None:
+                audio_bytes_io = extract_audio_track_to_memory(file_path, track_index)
+                if audio_bytes_io is None:
                     logging.error(f"Failed to extract audio track {track_index} from {file_path}")
                     continue
                 
-                # Transcribe the audio track
+                # Read the raw audio bytes from the BytesIO object
+                audio_bytes = audio_bytes_io.read()
+                
+                # Transcribe the audio track with raw audio bytes
                 track_result = model.transcribe(
+<<<<<<< HEAD
                     audio_data, 
                     language=requested_language or (track_language.to_iso_639_1() if track_language != LanguageCode.NONE else None), 
+=======
+                    audio_bytes, 
+                    language=track_language.to_iso_639_1() if track_language != LanguageCode.NONE and not force_language else force_language.to_iso_639_1(), 
+>>>>>>> de2ce7c (Try again)
                     task=transcription_type, 
                     verbose=None,
                     **args
@@ -1481,7 +1489,7 @@ def gen_subtitles(file_path: str, transcription_type: str, force_language: Langu
 
     finally:
         delete_model()
-
+        
 def define_subtitle_language_naming(language: LanguageCode, type):
     """
     Determines the naming format for a subtitle language based on the given type. 
