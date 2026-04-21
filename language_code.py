@@ -196,3 +196,6 @@ class LanguageCode(Enum):
             return self.iso_639_1 == other.iso_639_1
         # Otherwise, defer to the default equality
         return NotImplemented
+
+    def __hash__(self):
+        return hash(self.iso_639_1)
