@@ -1449,6 +1449,13 @@ def gen_subtitles(
         else:
             # Process each audio track separately
             logging.info(f"Processing {len(audio_tracks)} audio tracks in {os.path.basename(file_path)}")
+            projected_language_counts = {}
+            for track in audio_tracks:
+                projected_language = (
+                    force_language if should_force_all_tracks and force_language != LanguageCode.NONE else
+                    (track['language'] if track['language'] != LanguageCode.NONE else LanguageCode.NONE)
+                )
+                projected_language_counts[projected_language] = projected_language_counts.get(projected_language, 0) + 1
             
             for i, track in enumerate(audio_tracks):
                 track_language = track['language']
@@ -1483,9 +1490,18 @@ def gen_subtitles(
                         force_language if force_language != LanguageCode.NONE else LanguageCode.from_string(track_result.language)
                     ))
                 )
+                include_track_number = projected_language_counts.get(detected_language, 0) > 1
+                if track_language == LanguageCode.NONE and not should_force_all_tracks:
+                    include_track_number = True
                 
                 # Save the subtitle with track information in the filename
-                track_subtitle_path = name_subtitle_with_track(file_path, detected_language, i+1, track_title)
+                track_subtitle_path = name_subtitle_with_track(
+                    file_path,
+                    detected_language,
+                    i+1,
+                    track_title,
+                    include_track_number=include_track_number
+                )
                 track_result.to_srt_vtt(track_subtitle_path, word_level=word_level_highlight)
                 send_completion_webhook(file_path, track_subtitle_path, detected_language, transcription_type)
                 
@@ -1543,11 +1559,23 @@ def name_subtitle(file_path: str, language: LanguageCode) -> str:
     
     return f"{os.path.splitext(file_path)[0]}{subgen_part}{model_part}.{lang_part}.srt"
 
+def build_track_subtitle_base(file_path: str, language: LanguageCode) -> str:
+    subgen_part = ".subgen" if show_in_subname_subgen else ""
+    model_part = f".{whisper_model}" if show_in_subname_model else ""
+    lang_part = define_subtitle_language_naming(language, subtitle_language_naming_type)
+    return f"{os.path.splitext(file_path)[0]}{subgen_part}{model_part}.{lang_part}"
+
 def is_generic_track_title(track_title: str, track_number: int) -> bool:
     normalized_title = track_title.strip().lower()
     return normalized_title in {"", "none", f"track {track_number}", f"track{track_number}"}
 
-def name_subtitle_with_track(file_path: str, language: LanguageCode, track_number: int, track_title: str) -> str:
+def name_subtitle_with_track(
+    file_path: str,
+    language: LanguageCode,
+    track_number: int,
+    track_title: str,
+    include_track_number: bool = True
+) -> str:
     """
     Name the subtitle file to be written, based on the source file, language, and track information.
 
@@ -1560,11 +1588,9 @@ def name_subtitle_with_track(file_path: str, language: LanguageCode, track_numbe
     Returns:
         The name of the subtitle file to be written.
     """
-    subgen_part = ".subgen" if show_in_subname_subgen else ""
-    model_part = f".{whisper_model}" if show_in_subname_model else ""
-    lang_part = define_subtitle_language_naming(language, subtitle_language_naming_type)
-
-    subtitle_path = f"{os.path.splitext(file_path)[0]}{subgen_part}{model_part}.{lang_part}.track{track_number}"
+    subtitle_path = build_track_subtitle_base(file_path, language)
+    if include_track_number:
+        subtitle_path = f"{subtitle_path}.track{track_number}"
     if is_generic_track_title(track_title, track_number):
         return f"{subtitle_path}.srt"
 
