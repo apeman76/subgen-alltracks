@@ -1,4 +1,4 @@
-subgen_version = '2026.04.7'
+subgen_version = '2026.04.9'
 
 """
 ENVIRONMENT VARIABLES DOCUMENTATION
@@ -1524,6 +1524,10 @@ def name_subtitle(file_path: str, language: LanguageCode) -> str:
     
     return f"{os.path.splitext(file_path)[0]}{subgen_part}{model_part}.{lang_part}.srt"
 
+def is_generic_track_title(track_title: str, track_number: int) -> bool:
+    normalized_title = track_title.strip().lower()
+    return normalized_title in {"", "none", f"track {track_number}", f"track{track_number}"}
+
 def name_subtitle_with_track(file_path: str, language: LanguageCode, track_number: int, track_title: str) -> str:
     """
     Name the subtitle file to be written, based on the source file, language, and track information.
@@ -1540,11 +1544,16 @@ def name_subtitle_with_track(file_path: str, language: LanguageCode, track_numbe
     subgen_part = ".subgen" if show_in_subname_subgen else ""
     model_part = f".{whisper_model}" if show_in_subname_model else ""
     lang_part = define_subtitle_language_naming(language, subtitle_language_naming_type)
-    
-    # Clean track_title to make it filesystem-safe
-    safe_title = "".join(c if c.isalnum() or c in " -_." else "_" for c in track_title)
-    
-    return f"{os.path.splitext(file_path)[0]}{subgen_part}{model_part}.{lang_part}.track{track_number}.{safe_title}.srt"
+
+    subtitle_path = f"{os.path.splitext(file_path)[0]}{subgen_part}{model_part}.{lang_part}.track{track_number}"
+    if is_generic_track_title(track_title, track_number):
+        return f"{subtitle_path}.srt"
+
+    safe_title = "".join(c if c.isalnum() or c in " -_." else "_" for c in track_title).strip()
+    if not safe_title:
+        return f"{subtitle_path}.srt"
+
+    return f"{subtitle_path}.{safe_title}.srt"
 
 def handle_multiple_audio_tracks(file_path: str, language: LanguageCode | None = None) -> bytes | None:
     """
