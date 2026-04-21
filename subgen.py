@@ -1,4 +1,4 @@
-subgen_version = '2026.04.9'
+subgen_version = '2026.04.10'
 
 """
 ENVIRONMENT VARIABLES DOCUMENTATION
@@ -369,7 +369,12 @@ def transcription_worker():
             elif task_type == "asr":
                 asr_task_worker(task)
             else: # transcribe
-                gen_subtitles(task['path'], task['transcribe_or_translate'], task['force_language'])
+                gen_subtitles(
+                    task['path'],
+                    task['transcribe_or_translate'],
+                    task['force_language'],
+                    task.get('force_language_source', 'auto')
+                )
                 
                 # --- METADATA REFRESH LOGIC ---
                 if 'plex_item_id' in task:
@@ -1211,7 +1216,8 @@ def detect_language_task(path, original_task_data=None):
         'path': path,
         'type': 'transcribe',
         'transcribe_or_translate': transcribe_or_translate,
-        'force_language': detected_language
+        'force_language': detected_language,
+        'force_language_source': 'detected'
     }
     
     # Carry over metadata (Plex IDs, etc.) from the original task
@@ -1388,13 +1394,19 @@ def send_completion_webhook(source_file_path: str, subtitle_file_path: str, lang
     except Exception as e:
         logging.error(f"Failed to send completion webhook: {e}")
 
-def gen_subtitles(file_path: str, transcription_type: str, force_language: LanguageCode = LanguageCode.NONE) -> None:
+def gen_subtitles(
+    file_path: str,
+    transcription_type: str,
+    force_language: LanguageCode = LanguageCode.NONE,
+    force_language_source: str = 'auto'
+) -> None:
     """Generates subtitles for a video file. 
 
     Args:
         file_path: str - The path to the video file. 
         transcription_type: str - The type of transcription or translation to perform.
         force_language: str - The language to force for transcription or translation. Default is None. 
+        force_language_source: str - How the language was chosen (explicit, detected, preferred_audio, default_audio, auto).
     """
 
     try:
@@ -1416,6 +1428,7 @@ def gen_subtitles(file_path: str, transcription_type: str, force_language: Langu
         # Get all audio tracks
         audio_tracks = get_audio_tracks(file_path)
         requested_language = force_language.to_iso_639_1() if force_language != LanguageCode.NONE else None
+        should_force_all_tracks = force_language_source in {'explicit', 'env_forced_detected', 'detected'}
         
         if is_audio_file or len(audio_tracks) <= 1:
             # For audio files or videos with only one audio track, process normally
@@ -1452,8 +1465,11 @@ def gen_subtitles(file_path: str, transcription_type: str, force_language: Langu
                 
                 # Transcribe the audio track with raw audio bytes
                 track_result = model.transcribe(
-                    audio_bytes, 
-                    language=requested_language or (track_language.to_iso_639_1() if track_language != LanguageCode.NONE else None), 
+                    audio_bytes,
+                    language=(
+                        requested_language if should_force_all_tracks else
+                        (track_language.to_iso_639_1() if track_language != LanguageCode.NONE else requested_language)
+                    ),
                     task=transcription_type, 
                     verbose=None,
                     **args
@@ -1461,8 +1477,11 @@ def gen_subtitles(file_path: str, transcription_type: str, force_language: Langu
                 appendLine(track_result)
                 
                 # Determine the language for the subtitle file
-                detected_language = force_language if force_language != LanguageCode.NONE else (
-                    track_language if track_language != LanguageCode.NONE else LanguageCode.from_string(track_result.language)
+                detected_language = (
+                    force_language if should_force_all_tracks and force_language != LanguageCode.NONE else
+                    (track_language if track_language != LanguageCode.NONE else (
+                        force_language if force_language != LanguageCode.NONE else LanguageCode.from_string(track_result.language)
+                    ))
                 )
                 
                 # Save the subtitle with track information in the filename
@@ -1657,10 +1676,11 @@ def choose_transcribe_language(file_path, forced_language):
         forced_language: The language to force for transcription if specified.
 
     Returns:
-        The language code to be used for transcription. It prioritizes the
-        `forced_language`, then the environment variable `force_detected_language_to`,
-        then the preferred audio language if available, and finally the default
-        language of the audio tracks. Returns None if no language preference is
+        tuple[LanguageCode, str]: The language code to be used for transcription and
+        a string describing its source. It prioritizes the `forced_language`, then
+        the environment variable `force_detected_language_to`, then the preferred
+        audio language if available, and finally the default language of the audio
+        tracks. Returns `(LanguageCode.NONE, 'auto')` if no language preference is
         determined.
     """
     
@@ -1668,11 +1688,11 @@ def choose_transcribe_language(file_path, forced_language):
     
     if forced_language: 
         logger.debug(f"ENV FORCE_LANGUAGE is set: Forcing language to {forced_language}") 
-        return forced_language
+        return forced_language, 'explicit'
 
     if force_detected_language_to: 
         logger.debug(f"ENV FORCE_DETECTED_LANGUAGE_TO is set: Forcing detected language to {force_detected_language_to}")
-        return force_detected_language_to
+        return force_detected_language_to, 'env_forced_detected'
 
     audio_tracks = get_audio_tracks(file_path)
     
@@ -1680,14 +1700,14 @@ def choose_transcribe_language(file_path, forced_language):
 
     if preferred_track_language: 
         #logging.debug(f"Preferred language found: {preferred_track_language}")
-        return preferred_track_language
+        return preferred_track_language, 'preferred_audio'
     
     default_language = find_default_audio_track_language(audio_tracks)
     if default_language: 
         logger.debug(f"Default language found: {default_language}")
-        return default_language
+        return default_language, 'default_audio'
 
-    return LanguageCode.NONE
+    return LanguageCode.NONE, 'auto'
     
 def get_audio_tracks(video_file):
     """
@@ -1781,7 +1801,7 @@ def gen_subtitles_queue(file_path: str, transcription_type: str, force_language:
         logging.debug(f"{file_path} doesn't have any audio to transcribe!")
         return
     
-    force_language = choose_transcribe_language(file_path, force_language)
+    force_language, force_language_source = choose_transcribe_language(file_path, force_language)
 
     if should_skip_file(file_path, force_language): # skip a file before we waste time detecting it's language
         return
@@ -1799,7 +1819,8 @@ def gen_subtitles_queue(file_path: str, transcription_type: str, force_language:
     task = {
         'path': file_path,
         'transcribe_or_translate': transcription_type,
-        'force_language': force_language
+        'force_language': force_language,
+        'force_language_source': force_language_source
     }
     # Pass metadata info (kwargs) to the transcribe task
     task.update(kwargs)
