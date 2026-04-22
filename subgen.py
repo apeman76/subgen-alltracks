@@ -568,7 +568,7 @@ def receive_tautulli_webhook(
             fullpath = file
             logging.debug(f"Full file path: {fullpath}")
 
-            gen_subtitles_queue(path_mapping(fullpath), transcribe_or_translate)
+            gen_subtitles_queue(path_mapping(fullpath), transcribe_or_translate, respect_existing_subtitles=False)
     else:
         return {
             "message": "This doesn't appear to be a properly configured Tautulli webhook, please review the instructions again!"}
@@ -600,6 +600,7 @@ def receive_plex_webhook(
             gen_subtitles_queue(
                 path_mapping(fullpath), 
                 transcribe_or_translate, 
+                respect_existing_subtitles=False,
                 plex_item_id=rating_key, 
                 plex_server=plexserver, 
                 plex_token=plextoken
@@ -614,6 +615,7 @@ def receive_plex_webhook(
                     gen_subtitles_queue(
                         path_mapping(next_file), 
                         transcribe_or_translate,
+                        respect_existing_subtitles=False,
                         plex_item_id=next_key, # Pass the NEXT ID so it refreshes when done
                         plex_server=plexserver,
                         plex_token=plextoken
@@ -631,6 +633,7 @@ def receive_plex_webhook(
                         gen_subtitles_queue(
                             file_path, 
                             transcribe_or_translate,
+                            respect_existing_subtitles=False,
                             plex_item_id=current_rating_key, # Pass the specific loop ID for refreshing
                             plex_server=plexserver,
                             plex_token=plextoken
@@ -674,6 +677,7 @@ def receive_jellyfin_webhook(
             gen_subtitles_queue(
                 path_mapping(fullpath), 
                 transcribe_or_translate,
+                respect_existing_subtitles=False,
                 jellyfin_item_id=ItemId,
                 jellyfin_server=jellyfinserver,
                 jellyfin_token=jellyfintoken
@@ -708,7 +712,7 @@ def receive_emby_webhook(
     if (event == "library.new" and procaddedmedia) or (event == "playback.start" and procmediaonplay):
         fullpath = data_dict['Item']['Path']
         logging.debug(f"Full file path: {fullpath}")
-        gen_subtitles_queue(path_mapping(fullpath), transcribe_or_translate)
+        gen_subtitles_queue(path_mapping(fullpath), transcribe_or_translate, respect_existing_subtitles=False)
 
     return ""
     
@@ -717,7 +721,7 @@ def batch(
         directory: str = Query(...),
         forceLanguage: Union[str, None] = Query(default=None)
 ):
-    transcribe_existing(directory, LanguageCode.from_string(forceLanguage))
+    transcribe_existing(directory, LanguageCode.from_string(forceLanguage), respect_existing_subtitles=False)
 
 # ============================================================================
 # REFACTORED /ASR ENDPOINT WITH HASH-BASED DEDUPLICATION AND BLOCKING
@@ -1815,7 +1819,13 @@ def find_default_audio_track_language(audio_tracks):
             return track['language']
     return None
     
-def gen_subtitles_queue(file_path: str, transcription_type: str, force_language: LanguageCode = LanguageCode.NONE, **kwargs) -> None:
+def gen_subtitles_queue(
+    file_path: str,
+    transcription_type: str,
+    force_language: LanguageCode = LanguageCode.NONE,
+    respect_existing_subtitles: bool = True,
+    **kwargs
+) -> None:
     global task_queue
     
     # Check if this file is already in the queue or being processed
@@ -1829,7 +1839,7 @@ def gen_subtitles_queue(file_path: str, transcription_type: str, force_language:
     
     force_language, force_language_source = choose_transcribe_language(file_path, force_language)
 
-    if should_skip_file(file_path, force_language): # skip a file before we waste time detecting it's language
+    if should_skip_file(file_path, force_language, respect_existing_subtitles): # skip a file before we waste time detecting it's language
         return
     
     # check if we would like to detect audio language in case of no audio language specified. Will return here again with specified language from whisper
@@ -1854,7 +1864,7 @@ def gen_subtitles_queue(file_path: str, transcription_type: str, force_language:
     task_queue.put(task)
     #logging.debug(f"Added to queue: {task['path']}, {task['transcribe_or_translate']}, {task['force_language']}")
 
-def should_skip_file(file_path: str, target_language: LanguageCode) -> bool:
+def should_skip_file(file_path: str, target_language: LanguageCode, respect_existing_subtitles: bool = True) -> bool:
     """
     Determines if subtitle generation should be skipped for a file.
 
@@ -1882,7 +1892,7 @@ def should_skip_file(file_path: str, target_language: LanguageCode) -> bool:
         return True
 
     # 3. Skip if a subtitle already exists in the target language.
-    if skip_if_to_transcribe_sub_already_exist:
+    if respect_existing_subtitles and skip_if_to_transcribe_sub_already_exist:
         if has_subtitle_language(file_path, target_language):
             lang_name = target_language.to_name()
             logging.info(f"Skipping {base_name}: Subtitles already exist in {lang_name}.")
@@ -1908,7 +1918,7 @@ def should_skip_file(file_path: str, target_language: LanguageCode) -> bool:
         return True
 
     # 5. Skip if an external subtitle exists in the namesublang language
-    if skipifexternalsub and namesublang and LanguageCode.is_valid_language(namesublang):
+    if respect_existing_subtitles and skipifexternalsub and namesublang and LanguageCode.is_valid_language(namesublang):
         external_lang = LanguageCode.from_string(namesublang)
         if has_subtitle_of_language_in_folder(file_path, external_lang, recursion=True, only_skip_if_subgen_subtitle=only_skip_if_subgen_subtitle):
             lang_name = external_lang.to_name()
@@ -2401,7 +2411,7 @@ if monitor:
                 file_path = event.src_path
                 if has_audio(file_path):
                     logging.info(f"File: {path_mapping(file_path)} was added")
-                    gen_subtitles_queue(path_mapping(file_path), transcribe_or_translate)
+                    gen_subtitles_queue(path_mapping(file_path), transcribe_or_translate, respect_existing_subtitles=False)
 
         def handle_event(self, event):
             """Wait for stability before processing the file."""
@@ -2416,7 +2426,11 @@ if monitor:
         def on_modified(self, event):
             self.handle_event(event)
 
-def transcribe_existing(transcribe_folders, forceLanguage : LanguageCode | None = None):
+def transcribe_existing(
+    transcribe_folders,
+    forceLanguage : LanguageCode | None = None,
+    respect_existing_subtitles: bool = True
+):
     transcribe_folders = transcribe_folders.split("|")
     logging.info("Starting to search folders to see if we need to create subtitles.")
     logging.debug("The folders are:")
@@ -2425,11 +2439,21 @@ def transcribe_existing(transcribe_folders, forceLanguage : LanguageCode | None 
         for root, dirs, files in os.walk(path):
             for file in files:
                 file_path = os.path.join(root, file)
-                gen_subtitles_queue(path_mapping(file_path), transcribe_or_translate, forceLanguage)
+                gen_subtitles_queue(
+                    path_mapping(file_path),
+                    transcribe_or_translate,
+                    forceLanguage,
+                    respect_existing_subtitles=respect_existing_subtitles
+                )
     # if the path specified was actually a single file and not a folder, process it
     if os.path.isfile(path):
         if has_audio(path):
-            gen_subtitles_queue(path_mapping(path), transcribe_or_translate, forceLanguage) 
+            gen_subtitles_queue(
+                path_mapping(path),
+                transcribe_or_translate,
+                forceLanguage,
+                respect_existing_subtitles=respect_existing_subtitles
+            ) 
      # Set up the observer to watch for new files
     if monitor:
         observer = Observer()
