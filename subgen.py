@@ -1879,6 +1879,19 @@ def should_skip_file(file_path: str, target_language: LanguageCode, respect_exis
     file_name, file_ext = os.path.splitext(base_name)
     if transcribe_or_translate == 'translate': 
         target_language = LanguageCode.ENGLISH # Force our target language as english if we are translating
+
+    # Startup/library scans may want to skip only auto-generated Subgen subtitles
+    # even when generic "skip existing target subtitles" is disabled.
+    if respect_existing_subtitles and only_skip_if_subgen_subtitle:
+        if has_subtitle_of_language_in_folder(
+            file_path,
+            target_language,
+            recursion=True,
+            only_skip_if_subgen_subtitle=True
+        ):
+            logging.info(f"Skipping {base_name}: Existing Subgen subtitle found.")
+            return True
+
     # 1. Skip if it's an audio file and an LRC file already exists.
     if isAudioFileExtension(file_ext) and lrc_for_audio_files:
         lrc_path = os.path.join(os.path.dirname(file_path), f"{file_name}.lrc")
