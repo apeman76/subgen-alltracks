@@ -2072,7 +2072,8 @@ def has_subtitle_of_language_in_folder(video_file: str, target_language: Languag
                 if only_skip_if_subgen_subtitle:
                     if has_subgen:
                         logging.debug("Skipping subtitles because they are auto-generated ('subgen').")
-                        return False
+                        return True
+                    continue
                 logging.debug("Skipping subtitles because language is NONE.")
                 return True  # Default behavior if subtitles exist
 
